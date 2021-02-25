@@ -55,6 +55,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -148,6 +149,7 @@ import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Tool;
 import org.apache.hbase.HBCKMetaTableAccessor;
 import org.apache.yetus.audience.InterfaceAudience;
@@ -381,7 +383,7 @@ public class HBaseFsck extends Configured implements Closeable {
   private static ExecutorService createThreadPool(Configuration conf) {
     int numThreads = conf.getInt("hbasefsck.numthreads", MAX_NUM_THREADS);
     return new ScheduledThreadPoolExecutor(numThreads,
-        Threads.newDaemonThreadFactory("hbasefsck"));
+        newDaemonThreadFactory("hbasefsck"));
   }
 
   /**
@@ -5616,4 +5618,83 @@ public class HBaseFsck extends Configured implements Closeable {
       }
     }
   }
+
+
+
+
+  private static final AtomicInteger poolNumberIdx = new AtomicInteger(1);
+
+  /**
+   * Returns a {@link java.util.concurrent.ThreadFactory} that names each created thread uniquely,
+   * with a common prefix.
+   * @param prefix The prefix of every created Thread's name
+   * @return a {@link java.util.concurrent.ThreadFactory} that names threads
+   */
+  public static ThreadFactory getNamedThreadFactory(final String prefix) {
+    SecurityManager s = System.getSecurityManager();
+    final ThreadGroup threadGroup = (s != null) ? s.getThreadGroup() : Thread.currentThread()
+      .getThreadGroup();
+
+    return new ThreadFactory() {
+      final AtomicInteger threadNumber = new AtomicInteger(1);
+      private final int poolNumber = poolNumberIdx.getAndIncrement();
+      final ThreadGroup group = threadGroup;
+
+      @Override
+      public Thread newThread(Runnable r) {
+        final String name = prefix + "-pool" + poolNumber + "-t" + threadNumber.getAndIncrement();
+        return new Thread(group, r, name);
+      }
+    };
+  }
+
+  /**
+   * Same as {#newDaemonThreadFactory(String, UncaughtExceptionHandler)},
+   * without setting the exception handler.
+   */
+  public static ThreadFactory newDaemonThreadFactory(final String prefix) {
+    return newDaemonThreadFactory(prefix, null);
+  }
+
+  /**
+   * Get a named {@link ThreadFactory} that just builds daemon threads.
+   * @param prefix name prefix for all threads created from the factory
+   * @param handler unhandles exception handler to set for all threads
+   * @return a thread factory that creates named, daemon threads with
+   *         the supplied exception handler and normal priority
+   */
+  public static ThreadFactory newDaemonThreadFactory(final String prefix,
+                                                     final Thread.UncaughtExceptionHandler handler) {
+    final ThreadFactory namedFactory = getNamedThreadFactory(prefix);
+    return new ThreadFactory() {
+      @Override
+      public Thread newThread(Runnable r) {
+        Thread t = namedFactory.newThread(r);
+        if (handler != null) {
+          t.setUncaughtExceptionHandler(handler);
+        } else {
+          t.setUncaughtExceptionHandler(LOGGING_EXCEPTION_HANDLER);
+        }
+        if (!t.isDaemon()) {
+          t.setDaemon(true);
+        }
+        if (t.getPriority() != Thread.NORM_PRIORITY) {
+          t.setPriority(Thread.NORM_PRIORITY);
+        }
+        return t;
+      }
+
+    };
+  }
+
+
+  public static final Thread.UncaughtExceptionHandler LOGGING_EXCEPTION_HANDLER =
+    new Thread.UncaughtExceptionHandler() {
+      @Override
+      public void uncaughtException(Thread t, Throwable e) {
+        LOG.warn("Thread:" + t + " exited with Exception:"
+                   + StringUtils.stringifyException(e));
+      }
+    };
+
 }
